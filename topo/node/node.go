@@ -300,6 +300,11 @@ func (n *Impl) CreatePod(ctx context.Context) error {
 					}},
 				},
 			},
+			ImagePullSecrets: []corev1.LocalObjectReference{
+				{
+					Name: "kne-pull-secret",
+				},
+			},
 		},
 	}
 	if pb.Config.ConfigData != nil {
