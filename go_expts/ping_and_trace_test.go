@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"encoding/json"
@@ -60,10 +61,21 @@ type Output struct {
 // (https://stackoverflow.com/questions/68126459/is-test-xxx-func-safe-to-access-shared-data-in-golang
 var global_output Output
 
-// Exec command (in Linux shell of router if in_router = true)
-func exec_wrapper(topo_name, command string, in_router bool) (string, string, error) {
+type ExecLocation int64
+
+const (
+	Shell ExecLocation = iota
+	RouterShell
+	RouterCLI
+)
+
+// Exec command
+func exec_wrapper(topo_name, command string, location ExecLocation) (string, string, error) {
 	full_command := command
-	if in_router {
+	if location == RouterCLI {
+		command = "sr_cli " + command
+	}
+	if location == RouterShell || location == RouterCLI {
 		full_command = fmt.Sprintf("kubectl -n %v exec -it %v -- %v", namespace, topo_name, command)
 	}
 	var stdout bytes.Buffer
@@ -95,7 +107,6 @@ func getAllIfaces(t *testing.T) map[string]struct {
 	string
 	*ondatra.DUTDevice
 } {
-	all_routers := []Router{}
 
 	iface_ips := map[string]struct {
 		string
@@ -103,7 +114,6 @@ func getAllIfaces(t *testing.T) map[string]struct {
 	}{} // iface IP => {iface name, owning dut}
 
 	for _, dut := range ondatra.DUTs(t) {
-		router := Router{Name: dut.Name()}
 		ifaces := LookupAllVals(t, dut, gnmi.OC().InterfaceAny().State())
 		for _, iface := range ifaces {
 			if *iface.Enabled && !strings.Contains(*iface.Name, "mgmt") { // ignore mgmt iface
@@ -123,10 +133,7 @@ func getAllIfaces(t *testing.T) map[string]struct {
 			}
 		}
 
-		all_routers = append(all_routers, router)
 	}
-
-	global_output.AllRouters = all_routers
 
 	return iface_ips
 }
@@ -217,7 +224,7 @@ func TestPingLoop(t *testing.T) {
 	full_shell_ping_cmd := fmt.Sprintf(shell_ping_cmd, network_instance, dest_ip, ping_count,
 		sourceForPing(t, src_dut, dest_ip))
 	// ping stderr will complain about tty and whatnot
-	stdout, _, _ := exec_wrapper(src_dut.Name(), full_shell_ping_cmd, true)
+	stdout, _, _ := exec_wrapper(src_dut.Name(), full_shell_ping_cmd, RouterShell)
 	ping_success := strings.Contains(stdout, fmt.Sprintf("%v received", ping_count))
 	if ping_success {
 		t.Fatalf("Expected loop ping %v to fail\n", full_shell_ping_cmd)
@@ -225,12 +232,12 @@ func TestPingLoop(t *testing.T) {
 	tracePing(t, src_dut, dest_ip)
 
 	loop_undo_cmd := fmt.Sprintf("kne topology push %v %v %v", topo_filename, looped_dut.Name(), loop_undo_files[0])
-	_, _, err = exec_wrapper(looped_dut.Name(), loop_undo_cmd, false)
+	_, _, err = exec_wrapper(looped_dut.Name(), loop_undo_cmd, Shell)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	stdout, _, _ = exec_wrapper(src_dut.Name(), full_shell_ping_cmd, true)
+	stdout, _, _ = exec_wrapper(src_dut.Name(), full_shell_ping_cmd, RouterShell)
 	ping_success = strings.Contains(stdout, fmt.Sprintf("%v received", ping_count))
 	if !ping_success {
 		t.Fatalf("Expected fixed loop ping %v to succeed\n", full_shell_ping_cmd)
@@ -257,7 +264,7 @@ func TestPingAllStaticRoutes(t *testing.T) {
 					continue
 				}
 				full_shell_ping_cmd := fmt.Sprintf(shell_ping_cmd, network_instance, dest_ip, ping_count, src_ip)
-				stdout, _, err := exec_wrapper(dut.Name(), full_shell_ping_cmd, true)
+				stdout, _, err := exec_wrapper(dut.Name(), full_shell_ping_cmd, RouterShell)
 				ping_success := strings.Contains(stdout, fmt.Sprintf("%v received", ping_count))
 				if !ping_success {
 					t.Fatalf("Ping received < sent: %v from %v\n\nStdout: %v\nErr: %v\n", dest_ip, dut.Name(), stdout, err)
@@ -267,11 +274,41 @@ func TestPingAllStaticRoutes(t *testing.T) {
 	}
 }
 
+// Get all ifaces with nonzero TTL expire counts
+// Also output non-bad routers, for completeness
+func TestGetAllBits(t *testing.T) {
+	all_routers := []Router{}
+	// Nokia doesn't support /acl OpenConfig it seems
+	get_ttl_counts_cmd := fmt.Sprintf("info from state acl ipv4-filter %v", ttl_acl)
+	for _, dut := range ondatra.DUTs(t) {
+		router := Router{Name: dut.Name()}
+		stdout, _, err := exec_wrapper(dut.Name(), get_ttl_counts_cmd, RouterCLI)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(stdout, "\n")
+		for i, line := range lines {
+			if strings.Contains(line, "subinterface ") {
+				iface := strings.Split(strings.TrimSpace(line), " ")[1]
+				count, err := strconv.Atoi(strings.Split(strings.TrimSpace(lines[i+1]), " ")[1])
+				if err != nil {
+					t.Fatal(err)
+				}
+				if count > 0 {
+					router.BadIfaces = append(router.BadIfaces, iface)
+				}
+			}
+		}
+		all_routers = append(all_routers, router)
+	}
+	global_output.AllRouters = all_routers
+}
+
 // debug
 func showAllRouteTables(t *testing.T) {
 	for _, dut := range ondatra.DUTs(t) {
-		show_route_cmd := fmt.Sprintf("sr_cli show network-instance %v route-table", network_instance)
-		stdout, stderr, err := exec_wrapper(dut.Name(), show_route_cmd, true)
+		show_route_cmd := fmt.Sprintf("show network-instance %v route-table", network_instance)
+		stdout, stderr, err := exec_wrapper(dut.Name(), show_route_cmd, RouterCLI)
 		if err != nil {
 			fmt.Println(stderr)
 			t.Fatal(err)
@@ -337,12 +374,10 @@ func nexthop_dut(t *testing.T, dut *ondatra.DUTDevice, curhop *OnPathRouter, des
 	}
 	nexthop_ip := nexthop.IpAddress // If static route: IP of other endpoint. If direct route: outgoing IP
 	if nexthop_ip == nil {
-		fmt.Printf("end of path\n")
 		neigh_ip := curhop.PrevHopLink.OutIface.IP
 		curhop.InIface = neighIPToIface(t, dut, neigh_ip)
 		return nil, OnPathRouter{}
 	}
-	fmt.Printf("Outiface IP: %v\n", *nexthop_ip)
 	nexthop_info := iface_ips[*nexthop_ip]
 	if nexthop_info.DUTDevice.Name() != dut.Name() {
 		// Static route
@@ -350,8 +385,6 @@ func nexthop_dut(t *testing.T, dut *ondatra.DUTDevice, curhop *OnPathRouter, des
 			InIface: Iface{Name: nexthop_info.string, IP: *nexthop_ip}}
 
 		curhop.OutIface = neighIPToIface(t, dut, *nexthop_ip)
-		fmt.Printf("nexthop_router: %v\n", nexthop_router)
-
 		return nexthop_info.DUTDevice, nexthop_router
 	}
 
@@ -363,7 +396,6 @@ func nexthop_dut(t *testing.T, dut *ondatra.DUTDevice, curhop *OnPathRouter, des
 	iface_name := *nexthop.InterfaceRef.Interface
 	iface_ip := *nexthop.IpAddress
 	subiface := *nexthop.InterfaceRef.Subinterface
-	fmt.Printf("iface name: %v ip: %v subiface: %v\n", iface_name, iface_ip, subiface)
 
 	iface_info, has_val := gnmi.Lookup(t, dut, gnmi.OC().Lldp().Interface(iface_name).State()).Val()
 	if !has_val {
@@ -378,12 +410,9 @@ func nexthop_dut(t *testing.T, dut *ondatra.DUTDevice, curhop *OnPathRouter, des
 		iface_neighbor_dut = *neigh.SystemName // The topo name (this may be Nokia-specific)
 	}
 
-	fmt.Printf("iface neighbor: %v\n", iface_neighbor_dut)
-
 	nexthop_dut := topoNameToDUT(t, iface_neighbor_dut)
 	nexthop_router := OnPathRouter{Name: iface_neighbor_dut, PrevHopLink: curhop}
 
-	fmt.Printf("nexthop_router: %v\n", nexthop_router)
 	curhop.OutIface = Iface{Name: fmt.Sprintf("%v.%v", iface_name, subiface), IP: iface_ip}
 
 	return nexthop_dut, nexthop_router
@@ -411,11 +440,6 @@ func tracePing(t *testing.T, src_dut *ondatra.DUTDevice, dest_ip string) {
 			break
 		}
 		i++
-	}
-
-	fmt.Printf("path: \n")
-	for _, r := range path {
-		fmt.Printf("%v\n", r)
 	}
 
 	global_output.Paths = append(global_output.Paths, path)

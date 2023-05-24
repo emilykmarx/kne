@@ -15,7 +15,8 @@ import (
 	"google.golang.org/protobuf/encoding/prototext"
 )
 
-const network_instance = "DEFAULT" // Should get this more programmatically (should also not hard-code it in template cfgs)
+// Should get all these more programmatically (should also not hard-code in template cfgs)
+const network_instance = "DEFAULT"
 const dut_name_prefix = "srl"
 const topo_filename = "wtf_topo.pbtxt"
 const iface_name = "ethernet-1/%v"
@@ -23,6 +24,7 @@ const iface_key = "e1-%v"
 const template_ip = "192.168.0.X"
 const template_iface = "ethernet-1/Y"
 const template_grp = "grp-X"
+const ttl_acl = "wtf_ttl_filter"
 
 // Input path for graph & template configs, output path for all generated files
 // (This package is expected to be run from kne root)
@@ -92,6 +94,28 @@ func ifaceConfig(id int, iface_ips map[int]map[int]Iface) []string {
 		all_iface_config_lines = append(all_iface_config_lines, iface_config_lines...)
 	}
 	return all_iface_config_lines
+}
+
+// Return the ACL part of the config.
+// Creates counter incremented per-subiface when sending a TTL expire ICMP msg
+// (E.g. when dropping ping due to loop, if not original sender of ping)
+func aclConfig(id int, iface_ips map[int]map[int]Iface) []string {
+	b, err := os.ReadFile(fmt.Sprintf(Filepath, "template_ttl_acls.cfg"))
+	if err != nil {
+		log.Fatalln(err)
+	}
+	acl_template_config_lines := strings.Split(string(b), "\n")
+	// last line is empty
+	acl_face_line := strings.Clone(acl_template_config_lines[len(acl_template_config_lines)-2])
+	// Slice the part that creates the filter
+	all_acl_config_lines := acl_template_config_lines[0 : len(acl_template_config_lines)-2]
+	// Attach ACL to each iface
+	for _, iface := range iface_ips[id] {
+		acl_iface_line := strings.ReplaceAll(acl_face_line, template_iface, iface.Name)
+		all_acl_config_lines = append(all_acl_config_lines, acl_iface_line)
+	}
+
+	return all_acl_config_lines
 }
 
 // Set id's route to dest_ip using nexthop_id
@@ -181,7 +205,7 @@ func writeConfigFiles(paths map[int][]int, topo_nodes []*topopb.Node, iface_ips 
 		}
 	}
 
-	// 2. Interfaces & general Nokia config
+	// 2. Interfaces, ACLs, & general Nokia config
 	for id := range topo_nodes {
 		// All ifaces need IPs, even if not used in any shortest path
 		b, err := os.ReadFile("examples/nokia/srlinux-services/config.cfg")
@@ -191,6 +215,7 @@ func writeConfigFiles(paths map[int][]int, topo_nodes []*topopb.Node, iface_ips 
 		config_lines := strings.Split(string(b), "\n")
 		config_lines = append(config_lines, route_config_lines[id]...)
 		config_lines = append(config_lines, ifaceConfig(id, iface_ips)...)
+		config_lines = append(config_lines, aclConfig(id, iface_ips)...)
 
 		// EASYTODO: Delete configs once pushed to routers
 		output := strings.Join(config_lines, "\n")
