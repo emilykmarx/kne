@@ -5,10 +5,12 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"testing"
 
 	"github.com/openconfig/ondatra"
@@ -183,6 +185,61 @@ func sourceForPing(t *testing.T, src_dut *ondatra.DUTDevice, dest_ip string) str
 	return ""
 }
 
+// For the looped path: ping (from beginning of path), trace, undo loop, ping & trace again
+// XXX: watch for routing table change instead of tracing twice (https://netdevops.me/2020/arista-eos-gnmi-tutorial/).
+// May need to think abt timing of changes across diff routers.
+func TestPingLoop(t *testing.T) {
+	// If multiple looped routers just ping the first for now
+	// EASYTODO rm loop undo files (and others) after test over
+	t.Skip() // Remove if ran topo gen with -loop option!
+	loop_undo_files, err := filepath.Glob(loop_undo_filename[0:strings.Index(loop_undo_filename, "%")] + "*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var looped_router int
+	var src_router int
+	if _, err := fmt.Sscanf(loop_undo_files[0], loop_undo_filename, &looped_router, &src_router); err != nil {
+		t.Fatalf("Loop undo file named wrong?\n")
+	}
+	looped_dut := topoNameToDUT(t, fmt.Sprintf("%v%v", dut_name_prefix, looped_router))
+	src_dut := topoNameToDUT(t, fmt.Sprintf("%v%v", dut_name_prefix, src_router))
+	b, err := os.ReadFile(loop_undo_files[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	re := regexp.MustCompile(template_ip[0:len(template_ip)-1] + ".*/32")
+	dest_prefix := string(re.Find(b))
+	dest_ip := dest_prefix[0 : len(dest_prefix)-len("/32")]
+
+	ping_count := 1
+	/* Ondatra's raw gNOI ping doesn't work bc it doesn't allow setting network instance,
+	 * and router CLI doesn't allow ping in non-interactive mode */
+	full_shell_ping_cmd := fmt.Sprintf(shell_ping_cmd, network_instance, dest_ip, ping_count,
+		sourceForPing(t, src_dut, dest_ip))
+	// ping stderr will complain about tty and whatnot
+	stdout, _, _ := exec_wrapper(src_dut.Name(), full_shell_ping_cmd, true)
+	ping_success := strings.Contains(stdout, fmt.Sprintf("%v received", ping_count))
+	if ping_success {
+		t.Fatalf("Expected loop ping %v to fail\n", full_shell_ping_cmd)
+	}
+	tracePing(t, src_dut, dest_ip)
+
+	loop_undo_cmd := fmt.Sprintf("kne topology push %v %v %v", topo_filename, looped_dut.Name(), loop_undo_files[0])
+	_, _, err = exec_wrapper(looped_dut.Name(), loop_undo_cmd, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, _, _ = exec_wrapper(src_dut.Name(), full_shell_ping_cmd, true)
+	ping_success = strings.Contains(stdout, fmt.Sprintf("%v received", ping_count))
+	if !ping_success {
+		t.Fatalf("Expected fixed loop ping %v to succeed\n", full_shell_ping_cmd)
+	}
+	tracePing(t, src_dut, dest_ip)
+
+	// Once loop is undone, all paths should work
+}
+
 // For each dut with a (bidirectional) static route, ping the dest of that static route
 func TestPingAllStaticRoutes(t *testing.T) {
 	ping_count := 1
@@ -202,10 +259,6 @@ func TestPingAllStaticRoutes(t *testing.T) {
 				full_shell_ping_cmd := fmt.Sprintf(shell_ping_cmd, network_instance, dest_ip, ping_count, src_ip)
 				stdout, _, err := exec_wrapper(dut.Name(), full_shell_ping_cmd, true)
 				ping_success := strings.Contains(stdout, fmt.Sprintf("%v received", ping_count))
-				// XXX: Remove (testing trace)
-				if dut.Name() == "srl0" {
-					tracePing(t, dut, dest_ip)
-				}
 				if !ping_success {
 					t.Fatalf("Ping received < sent: %v from %v\n\nStdout: %v\nErr: %v\n", dest_ip, dut.Name(), stdout, err)
 				}
@@ -263,7 +316,6 @@ func neighIPToIface(t *testing.T, dut *ondatra.DUTDevice, target_neigh_ip string
 	return Iface{}
 }
 
-// TODO: watch for routing table change (https://netdevops.me/2020/arista-eos-gnmi-tutorial/)
 // EASYTODO better logging statements
 func nexthop_dut(t *testing.T, dut *ondatra.DUTDevice, curhop *OnPathRouter, dest_ip string,
 	iface_ips map[string]struct {

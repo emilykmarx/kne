@@ -2,10 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net/netip"
 	"os"
+	"reflect"
 	"strings"
 
 	topopb "github.com/openconfig/kne/proto/topo"
@@ -25,6 +27,8 @@ const template_grp = "grp-X"
 // Input path for graph & template configs, output path for all generated files
 // (This package is expected to be run from kne root)
 const Filepath = "go_expts/%v"
+
+var loop_undo_filename = "loop_undo_" + dut_name_prefix + "%d" + "_src_" + dut_name_prefix + "%d.cfg"
 
 // EASYTODO for files shared b/w this and other programs (py, ondatra, .sh): get names programmatically
 
@@ -113,11 +117,28 @@ func staticRouteConfig(id int, nexthop_id int, iface_ips map[int]map[int]Iface, 
 	return route_config_lines
 }
 
+// Just since it's nice to put the loop in the longest path
+// Iteration order over paths may not be deterministic, so only call this once
+func loopedPath(paths map[int][]int) []int {
+	var longest_path []int
+	longest_path_len := -1
+
+	for _, path := range paths {
+		if len(path) > longest_path_len {
+			longest_path = path
+			longest_path_len = len(path)
+		}
+	}
+
+	return longest_path
+}
+
 // Should do this configuration with gNMI/gNOI/gRIBI instead of Nokia commands
-func writeConfigFiles(paths map[int][]int, topo_nodes []*topopb.Node, iface_ips map[int]map[int]Iface) {
+func writeConfigFiles(paths map[int][]int, topo_nodes []*topopb.Node, iface_ips map[int]map[int]Iface, loop bool) {
 	// 1. Static routes
 	// Only do paths to & from one dest for now
 	route_config_lines := make([][]string, len(topo_nodes))
+	looped_path := loopedPath(paths)
 	for _, path := range paths {
 		// Direct and local routes are auto-installed
 		if len(path) < 3 {
@@ -125,6 +146,28 @@ func writeConfigFiles(paths map[int][]int, topo_nodes []*topopb.Node, iface_ips 
 		}
 		dest_ip := iface_ips[path[len(path)-1]][path[len(path)-2]].IP
 		src_ip := iface_ips[path[0]][path[1]].IP
+
+		if loop && reflect.DeepEqual(path, looped_path) {
+			// Put a loop in the longest path, from 2nd-to-last router to 3rd-to-last
+			// Note ping from a router to its neighbor still works even if they're part of a loop,
+			// since there's no routing	between neighbors
+			if len(path) < 3 {
+				log.Fatalf("Make paths longer (loop is nicer for paths of len at least 3)")
+			}
+			looped_router := path[len(path)-2]
+			src_router := path[0]
+			route_config_lines[looped_router] = append(route_config_lines[looped_router],
+				staticRouteConfig(looped_router, path[len(path)-3], iface_ips, dest_ip)...)
+			// Output cfg that can be pushed later to undo loop; filename indicates where it should be pushed
+			loop_undo_cmd := fmt.Sprintf("set / network-instance %v static-routes route %v/32 admin-state disable",
+				network_instance, dest_ip)
+
+			full_loop_undo_filename := fmt.Sprintf(loop_undo_filename, looped_router, src_router)
+			err := os.WriteFile(fmt.Sprintf(Filepath, full_loop_undo_filename), []byte(loop_undo_cmd), 0644)
+			if err != nil {
+				log.Fatalln(err)
+			}
+		}
 
 		for pathidx, id := range path {
 			if pathidx < len(path)-2 {
@@ -249,6 +292,9 @@ func gen_links(topo_graph TopoGraph, iface_ips map[int]map[int]Iface, topo_nodes
  * shouldn't assume that e.g. "srl0" in testbed is "srl0" here
  * (i.e. don't output info here indexed by srl ID) */
 func main() {
+	loop := flag.Bool("loop", false, "Configure a route loop")
+	flag.Parse()
+
 	b, err := os.ReadFile(fmt.Sprintf(Filepath, "topo.json"))
 	if err != nil {
 		log.Fatalf("Failed to read generated topo graph %v\n", err)
@@ -274,7 +320,7 @@ func main() {
 	topo_links, testbed_links := gen_links(*topo_graph, iface_ips, topo_nodes, testbed_nodes)
 
 	fmt.Printf("iface ips: \n%v\n", iface_ips)
-	writeConfigFiles(topo_graph.Paths, topo_nodes, iface_ips)
+	writeConfigFiles(topo_graph.Paths, topo_nodes, iface_ips, *loop)
 
 	topo := &topopb.Topology{
 		Name:  "wtf", // will be the kubes namespace
