@@ -2,7 +2,7 @@
 set -xe
 
 kind delete cluster --name=kne
-kne deploy deploy/kne/kind-bridge.yaml
+kne deploy deploy/kne/kind-bridge-srlinux-only.yaml
 
 set +e # ok if exists
 kubectl create namespace srlinux-controller
