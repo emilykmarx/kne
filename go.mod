@@ -39,6 +39,8 @@ require (
 	sigs.k8s.io/yaml v1.3.0
 )
 
+replace github.com/openconfig/ondatra v0.1.9 => ../ondatra
+
 require (
 	cloud.google.com/go/compute v1.19.0 // indirect
 	cloud.google.com/go/compute/metadata v0.2.3 // indirect
