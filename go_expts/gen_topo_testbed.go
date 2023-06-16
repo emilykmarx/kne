@@ -22,17 +22,26 @@ const topo_filename = "wtf_topo.pbtxt"
 const iface_name = "ethernet-1/%v"
 const iface_key = "e1-%v"
 const template_ip = "192.168.0.X"
+const template_prefix = "X.X.X.X/X"
 const template_iface = "ethernet-1/Y"
 const template_grp = "grp-X"
 const ttl_acl = "wtf_ttl_filter"
 
-// Input path for graph & template configs, output path for all generated files
-// (This package is expected to be run from kne root)
-const Filepath = "go_expts/%v"
+// Note this package is expected to be run from kne root
 
+// Input path for template configs
+const Wtfdir = "go_expts"
+
+// Path for generated files, i.e. input path for graph, output path for all generated files except egress (since outside egress build context)
+const Genpath = Wtfdir + "/out/%v"
+const Egressgenpath = Wtfdir + "/egress/out/%v"
+
+// Filenames indicate routers involved in looped path
+var loop_create_filename = "loop_create_" + dut_name_prefix + "%d" + "_src_" + dut_name_prefix + "%d.cfg"
 var loop_undo_filename = "loop_undo_" + dut_name_prefix + "%d" + "_src_" + dut_name_prefix + "%d.cfg"
 
-// EASYTODO for files shared b/w this and other programs (py, ondatra, .sh): get names programmatically
+// EASYTODO for files shared b/w this and other programs (py, ondatra, .sh):
+// get names from env var/config file/whatever
 
 var topo_services = map[uint32]*topopb.Service{
 	22: {
@@ -75,9 +84,17 @@ type Iface struct {
 	IP   string
 }
 
+func egressIfaceConfig(id int, iface_ips map[int]map[int]Iface) []string {
+	all_iface_config_lines := []string{}
+	for _, iface := range iface_ips[id] {
+		all_iface_config_lines = append(all_iface_config_lines, fmt.Sprintf("ip addr add %v/31 dev %v", iface.IP, ifaceKey(iface.Name)))
+	}
+	return all_iface_config_lines
+}
+
 // Return the interface part of the config
 func ifaceConfig(id int, iface_ips map[int]map[int]Iface) []string {
-	b, err := os.ReadFile(fmt.Sprintf(Filepath, "template_ifaces.cfg"))
+	b, err := os.ReadFile(Wtfdir + "/template_ifaces.cfg")
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -100,7 +117,7 @@ func ifaceConfig(id int, iface_ips map[int]map[int]Iface) []string {
 // Creates counter incremented per-subiface when sending a TTL expire ICMP msg
 // (E.g. when dropping ping due to loop, if not original sender of ping)
 func aclConfig(id int, iface_ips map[int]map[int]Iface) []string {
-	b, err := os.ReadFile(fmt.Sprintf(Filepath, "template_ttl_acls.cfg"))
+	b, err := os.ReadFile(Wtfdir + "/template_ttl_acls.cfg")
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -118,11 +135,32 @@ func aclConfig(id int, iface_ips map[int]map[int]Iface) []string {
 	return all_acl_config_lines
 }
 
-// Set id's route to dest_ip using nexthop_id
+// e.g. ethernet1-1 => e1-1
+func ifaceKey(name string) string {
+	var iface_id int
+	if _, err := fmt.Sscanf(name, iface_name, &iface_id); err != nil {
+		log.Fatalln(err)
+	}
+	return fmt.Sprintf(iface_key, iface_id)
+}
+
+// EASYTODO make host configuration persistent w/ netplan (NAT is, but ifaces aren't)
+// Set egress's route to dest_prefix using router_id
+// (egress and router_id should have a direct link)
+func egressRouteConfig(id int, router_id int, iface_ips map[int]map[int]Iface, dest_prefix string) string {
+	// set next-hop to other endpoint's interface
+	next_hop := iface_ips[router_id][id].IP
+	egress_iface := iface_ips[id][router_id]
+
+	route := fmt.Sprintf("ip route add %v via %v dev %v src %v", dest_prefix, next_hop, ifaceKey(egress_iface.Name), egress_iface.IP)
+	return route
+}
+
+// Set id's route to dest_prefix using nexthop_id
 // (id and nexthop_id should have a direct link)
-// Return the static route part of the config
-func staticRouteConfig(id int, nexthop_id int, iface_ips map[int]map[int]Iface, dest_ip string) []string {
-	b, err := os.ReadFile(fmt.Sprintf(Filepath, "template_static_routes.cfg"))
+// Note: host bits must be 0 (for Nokia)
+func staticRouteConfig(id int, nexthop_id int, iface_ips map[int]map[int]Iface, dest_prefix string) []string {
+	b, err := os.ReadFile(Wtfdir + "/template_static_routes.cfg")
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -131,7 +169,7 @@ func staticRouteConfig(id int, nexthop_id int, iface_ips map[int]map[int]Iface, 
 		// Each nexthop needs its own group name (will end up writing same group name multiple times if used in multiple paths; ok)
 		route_config_lines[lineno] = strings.ReplaceAll(route_config_lines[lineno], template_grp, fmt.Sprintf("grp-%v", nexthop_id))
 		if strings.Contains(route_config_lines[lineno], "route") {
-			route_config_lines[lineno] = strings.ReplaceAll(route_config_lines[lineno], template_ip, dest_ip)
+			route_config_lines[lineno] = strings.ReplaceAll(route_config_lines[lineno], template_prefix, dest_prefix)
 		} else if strings.Contains(route_config_lines[lineno], "nexthop") {
 			// set next-hop to other endpoint's interface
 			next_hop := iface_ips[nexthop_id][id].IP
@@ -159,54 +197,95 @@ func loopedPath(paths map[int][]int) []int {
 
 // Should do this configuration with gNMI/gNOI/gRIBI instead of Nokia commands
 func writeConfigFiles(paths map[int][]int, topo_nodes []*topopb.Node, iface_ips map[int]map[int]Iface, loop bool) {
+	egress_config_lines := []string{}
 	// 1. Static routes
-	// Only do paths to & from one dest for now
+	// The only routes configured are:
+	// Default to egress, for all routers
+	// Meaning:
+	// - All routers can reach the egress and external things routable via the egress
+	// - All routers on same path to egress can reach each other
 	route_config_lines := make([][]string, len(topo_nodes))
 	looped_path := loopedPath(paths)
 	for _, path := range paths {
-		// Direct and local routes are auto-installed
-		if len(path) < 3 {
+		// Direct and local routes are auto-installed, but need default for all other than egress
+		if len(path) < 2 {
 			continue
 		}
-		dest_ip := iface_ips[path[len(path)-1]][path[len(path)-2]].IP
-		src_ip := iface_ips[path[0]][path[1]].IP
+		default_prefix := "0.0.0.0/0"
+		src_prefix := iface_ips[path[0]][path[1]].IP + "/32"
+		var p_looped_router *int
+		var loop_src_router int // src router of looped path
 
 		if loop && reflect.DeepEqual(path, looped_path) {
-			// Put a loop in the longest path, from 2nd-to-last router to 3rd-to-last
+			// Output a config that, when pushed, puts a loop in the longest path to egress, from last router.
 			// Note ping from a router to its neighbor still works even if they're part of a loop,
 			// since there's no routing	between neighbors
 			if len(path) < 3 {
 				log.Fatalf("Make paths longer (loop is nicer for paths of len at least 3)")
 			}
-			looped_router := path[len(path)-2]
-			src_router := path[0]
-			route_config_lines[looped_router] = append(route_config_lines[looped_router],
-				staticRouteConfig(looped_router, path[len(path)-3], iface_ips, dest_ip)...)
-			// Output cfg that can be pushed later to undo loop; filename indicates where it should be pushed
-			loop_undo_cmd := fmt.Sprintf("set / network-instance %v static-routes route %v/32 admin-state disable",
-				network_instance, dest_ip)
-
-			full_loop_undo_filename := fmt.Sprintf(loop_undo_filename, looped_router, src_router)
-			err := os.WriteFile(fmt.Sprintf(Filepath, full_loop_undo_filename), []byte(loop_undo_cmd), 0644)
+			p_looped_router = &path[len(path)-2]
+			loop_src_router := path[0]
+			loop_create_cfg := staticRouteConfig(*p_looped_router, path[len(path)-3], iface_ips, default_prefix)
+			full_loop_create_filename := fmt.Sprintf(loop_create_filename, *p_looped_router, loop_src_router)
+			err := os.WriteFile(fmt.Sprintf(Genpath, full_loop_create_filename),
+				[]byte(strings.Join(loop_create_cfg, "\n")), 0644)
 			if err != nil {
 				log.Fatalln(err)
 			}
+			/*
+				loop_undo_cfg := fmt.Sprintf("set / network-instance %v static-routes route %v admin-state disable",
+					network_instance, default_prefix)
+			*/
+
 		}
 
+		// Some of this cfg will be output multiple times; ok
 		for pathidx, id := range path {
-			if pathidx < len(path)-2 {
-				// Route to dest
-				route_config_lines[id] = append(route_config_lines[id], staticRouteConfig(id, path[pathidx+1], iface_ips, dest_ip)...)
-			}
-			if pathidx > 1 {
-				// Route from dest
-				route_config_lines[id] = append(route_config_lines[id], staticRouteConfig(id, path[pathidx-1], iface_ips, src_ip)...)
+			egress_id := path[len(path)-1]
+			last_router_id := path[len(path)-2]
+			if id != egress_id {
+				next_id := path[pathidx+1]
+				// Router's default route
+				default_cfg := staticRouteConfig(id, next_id, iface_ips, default_prefix)
+				if p_looped_router != nil && id == *p_looped_router {
+					full_loop_undo_filename := fmt.Sprintf(loop_undo_filename, *p_looped_router, loop_src_router)
+					err := os.WriteFile(fmt.Sprintf(Genpath, full_loop_undo_filename), []byte(strings.Join(default_cfg, "\n")), 0644)
+					if err != nil {
+						log.Fatalln(err)
+					}
+				}
+				route_config_lines[id] = append(route_config_lines[id], default_cfg...)
+				// All downstream (towards egress) indirect routers to this router
+				if len(path)-2 > pathidx+1 {
+					my_prefix := iface_ips[id][next_id].IP + "/32"
+					for ds_idx, ds := range path[pathidx+2 : len(path)-1] {
+						ds_path_idx := ds_idx + 2 + pathidx
+						prev_hop := path[ds_path_idx-1]
+						route_config_lines[ds] = append(route_config_lines[ds], staticRouteConfig(ds, prev_hop, iface_ips, my_prefix)...)
+					}
+				}
+				if pathidx < len(path)-2 {
+					// Egress's route to router
+					egress_config_lines = append(egress_config_lines, egressRouteConfig(egress_id, last_router_id, iface_ips, src_prefix))
+				}
 			}
 		}
 	}
 
 	// 2. Interfaces, ACLs, & general Nokia config
-	for id := range topo_nodes {
+	for id, n := range topo_nodes {
+		if n.Vendor == topopb.Vendor_HOST {
+			// For egress: Must configure ifaces before routes
+			config_lines := append(egressIfaceConfig(id, iface_ips), egress_config_lines...)
+			output := strings.Join(config_lines, "\n")
+
+			// Relative to go root
+			err := os.WriteFile(fmt.Sprintf(Egressgenpath, "egress_setup_ifaces.sh"), []byte(output), 0644)
+			if err != nil {
+				log.Fatalln(err)
+			}
+			continue
+		}
 		// All ifaces need IPs, even if not used in any shortest path
 		b, err := os.ReadFile("examples/nokia/srlinux-services/config.cfg")
 		if err != nil {
@@ -217,12 +296,11 @@ func writeConfigFiles(paths map[int][]int, topo_nodes []*topopb.Node, iface_ips 
 		config_lines = append(config_lines, ifaceConfig(id, iface_ips)...)
 		config_lines = append(config_lines, aclConfig(id, iface_ips)...)
 
-		// EASYTODO: Delete configs once pushed to routers
 		output := strings.Join(config_lines, "\n")
 		// Relative to this directory
 		config_file := fmt.Sprintf("%v.cfg", topo_nodes[id].Name)
 		// Relative to go root
-		err = os.WriteFile(fmt.Sprintf(Filepath, config_file), []byte(output), 0644)
+		err = os.WriteFile(fmt.Sprintf(Genpath, config_file), []byte(output), 0644)
 		if err != nil {
 			log.Fatalln(err)
 		}
@@ -233,11 +311,26 @@ func writeConfigFiles(paths map[int][]int, topo_nodes []*topopb.Node, iface_ips 
 	}
 }
 
-func gen_routers(topo_graph TopoGraph) ([]*topopb.Node, []*testbedpb.Device) {
+func gen_routers(topo_graph TopoGraph, egress_id int) ([]*topopb.Node, []*testbedpb.Device) {
 	topo_nodes := []*topopb.Node{}
 	testbed_nodes := []*testbedpb.Device{}
 	for _, n := range topo_graph.Graph.Nodes {
-		topo_name := fmt.Sprintf("%v%v", dut_name_prefix, n["id"])
+		id := n["id"]
+		if id == egress_id {
+			topo_node := topopb.Node{
+				Name:   "egress",
+				Vendor: topopb.Vendor_HOST,
+				Config: &topopb.Config{
+					Image:   "egress:latest",
+					Command: []string{"./setup_nat_ifaces.sh"},
+				},
+				Services:   map[uint32]*topopb.Service{22: topo_services[22]},
+				Interfaces: map[string]*topopb.Interface{},
+			}
+			topo_nodes = append(topo_nodes, &topo_node)
+			continue
+		}
+		topo_name := fmt.Sprintf("%v%v", dut_name_prefix, id)
 		topo_node := topopb.Node{
 			Name:   topo_name,
 			Vendor: topopb.Vendor_NOKIA,
@@ -261,7 +354,8 @@ func gen_routers(topo_graph TopoGraph) ([]*topopb.Node, []*testbedpb.Device) {
 	return topo_nodes, testbed_nodes
 }
 
-func gen_links(topo_graph TopoGraph, iface_ips map[int]map[int]Iface, topo_nodes []*topopb.Node, testbed_nodes []*testbedpb.Device) ([]*topopb.Link, []*testbedpb.Link) {
+func gen_links(topo_graph TopoGraph, iface_ips map[int]map[int]Iface, topo_nodes []*topopb.Node, testbed_nodes []*testbedpb.Device,
+) ([]*topopb.Link, []*testbedpb.Link) {
 	ip := netip.MustParseAddr("192.168.0.0")
 	topo_links := []*topopb.Link{}
 	testbed_links := []*testbedpb.Link{}
@@ -272,6 +366,13 @@ func gen_links(topo_graph TopoGraph, iface_ips map[int]map[int]Iface, topo_nodes
 		testbed_link := testbedpb.Link{}
 		// direction doesn't matter
 		endpoint_ids := []int{l["source"], l["target"]}
+		need_testbed_link := true
+		for _, id := range endpoint_ids {
+			// Egress isn't part of testbed
+			if topo_nodes[id].Vendor == topopb.Vendor_HOST {
+				need_testbed_link = false
+			}
+		}
 
 		for i, id := range endpoint_ids {
 			iface_id := len(topo_nodes[id].Interfaces) + 1 // iface 0 is verboten
@@ -280,22 +381,28 @@ func gen_links(topo_graph TopoGraph, iface_ips map[int]map[int]Iface, topo_nodes
 			topo_nodes[id].Interfaces[full_iface_key] =
 				&topopb.Interface{Name: full_iface_name}
 
-			// Testbed ifaces can only have letter/#/_
-			testbed_port := fmt.Sprintf("port%v", iface_id)
-			testbed_nodes[id].Ports = append(testbed_nodes[id].Ports, &testbedpb.Port{Id: testbed_port})
-
-			testbed_link_endpoint := fmt.Sprintf("%v:%v", testbed_nodes[id].Id, testbed_port)
+			testbed_link_endpoint := ""
+			if need_testbed_link {
+				// Testbed ifaces can only have letter/#/_
+				testbed_port := fmt.Sprintf("port%v", iface_id)
+				testbed_nodes[id].Ports = append(testbed_nodes[id].Ports, &testbedpb.Port{Id: testbed_port})
+				testbed_link_endpoint = fmt.Sprintf("%v:%v", testbed_nodes[id].Id, testbed_port)
+			}
 			// Topo link interfaces must match node interface key
 			if i == 0 {
 				topo_link.ANode = topo_nodes[id].Name
 				topo_link.AInt = full_iface_key
-				testbed_link.A = testbed_link_endpoint
+				if need_testbed_link {
+					testbed_link.A = testbed_link_endpoint
+				}
 				// Smaller IP in link must have even last octet to put endpoints in same /31
 				iface_ips[id][endpoint_ids[1]] = Iface{Name: full_iface_name, IP: ip.String()}
 			} else {
 				topo_link.ZNode = topo_nodes[id].Name
 				topo_link.ZInt = full_iface_key
-				testbed_link.B = testbed_link_endpoint
+				if need_testbed_link {
+					testbed_link.B = testbed_link_endpoint
+				}
 				iface_ips[id][endpoint_ids[0]] = Iface{Name: full_iface_name, IP: ip.String()}
 			}
 
@@ -307,7 +414,9 @@ func gen_links(topo_graph TopoGraph, iface_ips map[int]map[int]Iface, topo_nodes
 		}
 
 		topo_links = append(topo_links, &topo_link)
-		testbed_links = append(testbed_links, &testbed_link)
+		if need_testbed_link {
+			testbed_links = append(testbed_links, &testbed_link)
+		}
 	}
 
 	return topo_links, testbed_links
@@ -320,7 +429,7 @@ func main() {
 	loop := flag.Bool("loop", false, "Configure a route loop")
 	flag.Parse()
 
-	b, err := os.ReadFile(fmt.Sprintf(Filepath, "topo.json"))
+	b, err := os.ReadFile(fmt.Sprintf(Genpath, "topo.json"))
 	if err != nil {
 		log.Fatalf("Failed to read generated topo graph %v\n", err)
 	}
@@ -331,12 +440,14 @@ func main() {
 
 	// 1. Create the routers (will fill in interfaces and configs later)
 	// Router's index in list is its id (e.g. srl0)
-	topo_nodes, testbed_nodes := gen_routers(*topo_graph)
+	path := topo_graph.Paths[0] // any path; they all have the same dest
+	egress_id := path[len(path)-1]
+	topo_nodes, testbed_nodes := gen_routers(*topo_graph, egress_id)
 
 	// 2. Create the links and fill in the interfaces
 
 	// Record IPs of ifaces for use in writing configs
-	// node ID => other nodeID, iface name & IP
+	// node ID => other nodeID, iface name & IP used for other
 	iface_ips := map[int]map[int]Iface{}
 	for id := range topo_nodes {
 		// prevent nil maps
@@ -357,19 +468,19 @@ func main() {
 		Links: testbed_links,
 	}
 
-	topo_bytes, err := prototext.Marshal(topo)
+	topo_bytes, err := prototext.MarshalOptions{Multiline: true}.Marshal(topo)
 	if err != nil {
 		fmt.Printf("Error marshaling topo: %v\n", err)
 	}
 	// needs to be in same dir as config file (I assume)
-	if err := os.WriteFile(fmt.Sprintf(Filepath, topo_filename), topo_bytes, 0666); err != nil {
+	if err := os.WriteFile(fmt.Sprintf(Genpath, topo_filename), topo_bytes, 0666); err != nil {
 		log.Fatalf("Error writing topo file: %v\n", err)
 	}
-	testbed_bytes, err := prototext.Marshal(testbed)
+	testbed_bytes, err := prototext.MarshalOptions{Multiline: true}.Marshal(testbed)
 	if err != nil {
 		log.Fatalf("Error marshaling testbed: %v\n", err)
 	}
-	if err := os.WriteFile(fmt.Sprintf(Filepath, "wtf_testbed.textproto"), testbed_bytes, 0666); err != nil {
+	if err := os.WriteFile(fmt.Sprintf(Genpath, "wtf_testbed.textproto"), testbed_bytes, 0666); err != nil {
 		log.Fatalf("Error writing testbed file: %v\n", err)
 	}
 }
