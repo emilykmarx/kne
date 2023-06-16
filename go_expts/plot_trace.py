@@ -12,7 +12,7 @@ import json
 
 test_outfile = "test_out.json"
 
-def trace_path(test_out, path, path_no):
+def trace_path(test_out, path, path_no, request):
   G = nx.DiGraph()
   unhealthy_nodes = set()
   scoped_nodes = [] # ordered
@@ -55,9 +55,10 @@ def trace_path(test_out, path, path_no):
   colors = ['tab:red' if node in unhealthy_nodes else 'gray' for node in G.nodes()]
   sizes = [300 if node in scoped_nodes else 30 for node in G.nodes()]
 
-  traced_ip = test_out['TracedIP']
+  traced_ip = request['TracedIP']
+  src_router = path[0]['Name']
   plt.figure(figsize=(10,10))
-  plt.title(f'Trace {traced_ip}, path #{path_no}')
+  plt.title(f'KNE: Trace {src_router} => {traced_ip}, path #{path_no}')
   pos=nx.get_node_attributes(G, 'pos')
   nx.draw_networkx_nodes(G, node_color=colors, node_size=sizes, pos=pos)
   nx.draw_networkx_labels(G, labels=labels, pos=pos, font_size=8)
@@ -68,7 +69,10 @@ def trace_path(test_out, path, path_no):
   nx.draw_networkx_edges(G, pos=pos, connectionstyle=f'arc3, rad = 0.1')
   # Label is close to the start of the arrow (helps disambiguate overlapping edges; would be better to change y pos but don't know how...)
   nx.draw_networkx_edge_labels(G, pos=pos, edge_labels=edge_labels, font_size=8, label_pos=0.8)
-  plt.savefig(f'{traced_ip}_{path_no}.png')
+  # Not putting request ID in title to emphasize network scoping doesn't use it,
+  # but use to disambiguate if 2 traced requests have the same params
+  request_id = request['RequestID']
+  plt.savefig(f'kne_trace_{src_router}_{traced_ip}_{path_no}_{request_id}.png')
   #plt.show()
 
 
@@ -76,8 +80,9 @@ def print_trace():
   with open(test_outfile) as f:
     test_out = json.load(f)
 
-  for i, path in enumerate(test_out['Paths']):
-    trace_path(test_out=test_out, path=path, path_no=i)
+  for request in test_out['Requests']:
+    for i, path in enumerate(request['Paths']):
+      trace_path(test_out=test_out, path=path, path_no=i + 1, request=request)
 
 
 def main():

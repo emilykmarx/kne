@@ -5,7 +5,6 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
-	"regexp"
 	"strconv"
 	"strings"
 
@@ -24,8 +23,13 @@ import (
 )
 
 const namespace = "wtf"
-const outfile = "test_out.json"
+const outfile = "out/test_out.json"
 const shell_ping_cmd = "ip netns exec srbase-%v ping %v -c%v -I%v"
+const curl_cmd = "ip netns exec srbase-%v curl --interface %v http://%v/productpage -H 'x-request-id: %v'"
+
+// Note this test expects the Istio gateway URL to be set as an env var
+var gateway_url = os.Getenv("GATEWAY_URL")
+var gateway_ip = strings.Split(gateway_url, ":")[0]
 
 func TestMain(m *testing.M) {
 	os.Remove(outfile)
@@ -47,18 +51,21 @@ type Router struct {
 	BadIfaces []string
 }
 
-type Output struct {
-	Paths      [][]OnPathRouter
-	AllRouters []Router
-	TracedIP   string
+// One request to be traced (by KNE and Istio)
+type RequestOutput struct {
+	TracedIP  string           // for KNE scoping
+	RequestID string           // for Istio scoping
+	Paths     [][]OnPathRouter // for KNE scoping
 }
 
-// To share state b/w bit-gathering test and trace test:
-// (Not a problem now, since setting bits at trace time)
-// Either t.Parallel() or spin off a thread in test if that's allowed
+// Info about all traced requests, for use by KNE and Istio plot scripts
+type Output struct {
+	// Includes bits. In reality, this would be a window
+	AllRouters []Router
+	Requests   []RequestOutput
+}
 
 // Make sure to lock this if run tests in //
-// (https://stackoverflow.com/questions/68126459/is-test-xxx-func-safe-to-access-shared-data-in-golang
 var global_output Output
 
 type ExecLocation int64
@@ -69,8 +76,8 @@ const (
 	RouterCLI
 )
 
-// Exec command
-func exec_wrapper(topo_name, command string, location ExecLocation) (string, string, error) {
+// Exec command from location
+func exec_wrapper(topo_name string, command string, location ExecLocation) (string, string, error) {
 	full_command := command
 	if location == RouterCLI {
 		command = "sr_cli " + command
@@ -143,140 +150,156 @@ func lpm(t *testing.T, dut *ondatra.DUTDevice, dest_ip string) *oc.NetworkInstan
 	route_entries := LookupAllVals(t, dut, gnmi.OC().NetworkInstance(network_instance).Afts().Ipv4EntryAny().State())
 	var longest_match *oc.NetworkInstance_Afts_Ipv4Entry
 	longest_match_len := -1
+	var default_match *oc.NetworkInstance_Afts_Ipv4Entry
 	for _, entry := range route_entries {
 		entry_prefix := netip.MustParsePrefix(*entry.Prefix)
 		if entry_prefix.Contains(netip.MustParseAddr(dest_ip)) && entry_prefix.Bits() > longest_match_len {
 			longest_match_len = entry_prefix.Bits()
 			longest_match = entry
+		} else if entry_prefix.String() == "0.0.0.0/0" {
+			default_match = entry
 		}
-	}
-	return longest_match
-}
 
-// For each dut, find which IPs (not just routers - need the iface) it has static routes to
-// Note: Would need to modify this slightly to support multiple
-func getAllRoutedIfaces(t *testing.T) map[string][]string {
-	// dut => [dest_ips]
-	routed_ips := map[string][]string{}
-	for _, dut := range ondatra.DUTs(t) {
-		route_entries := LookupAllVals(t, dut, gnmi.OC().NetworkInstance(network_instance).Afts().Ipv4EntryAny().State())
-		routed_ips[dut.Name()] = []string{}
-		for _, entry := range route_entries {
-			if entry.OriginProtocol == oc.PolicyTypes_INSTALL_PROTOCOL_TYPE_STATIC {
-				dest_ip := netip.MustParsePrefix(*entry.Prefix).Addr().String()
-				routed_ips[dut.Name()] = append(routed_ips[dut.Name()], dest_ip)
-			}
-		}
 	}
-	return routed_ips
+	if longest_match != nil {
+		return longest_match
+	}
+	if default_match == nil {
+		t.Fatalf("No LPM for %v on %v\n", dest_ip, dut)
+	}
+	return default_match
 }
 
 // Figure out which of src's ifaces the dest has a route to
-// Needed for ping that crosses subnets: Must set source addr to the iface that dst has a route to
-// (else reply can't be routed)
-func sourceForPing(t *testing.T, src_dut *ondatra.DUTDevice, dest_ip string) string {
-	routed_ips := getAllRoutedIfaces(t)
+// Needed when routers on reply path only have a route to some of the src's ifaces
+func sourceAddr(t *testing.T, src_dut *ondatra.DUTDevice, dest_ip string) string {
 	iface_ips := getAllIfaces(t)
-
-	// iface IP => iface name, owning dut
-	dst_dut := iface_ips[dest_ip].DUTDevice.Name()
-	dst_routed_ips := routed_ips[dst_dut]
-	// IPs dest has a route to
-	for _, ip := range dst_routed_ips {
-		// IP is one of src's
-		if iface_ips[ip].DUTDevice.Name() == src_dut.Name() {
-			return ip
-		}
-	}
-
-	return ""
+	info := OnPathRouter{}
+	nexthop_dut(t, src_dut, &info, dest_ip, iface_ips)
+	return info.OutIface.IP
 }
 
-// For the looped path: ping (from beginning of path), trace, undo loop, ping & trace again
-// XXX: watch for routing table change instead of tracing twice (https://netdevops.me/2020/arista-eos-gnmi-tutorial/).
-// May need to think abt timing of changes across diff routers.
-func TestPingLoop(t *testing.T) {
-	// If multiple looped routers just ping the first for now
-	// EASYTODO rm loop undo files (and others) after test over
-	t.Skip() // Remove if ran topo gen with -loop option!
-	loop_undo_files, err := filepath.Glob(loop_undo_filename[0:strings.Index(loop_undo_filename, "%")] + "*")
+// Ping egress from all routers
+// This is a way to check KNE is set up correctly
+/* Ondatra's raw gNOI ping doesn't work bc it doesn't allow setting network instance,
+* and router CLI doesn't allow ping in non-interactive mode */
+func TestPingEgress(t *testing.T) {
+	ping_count := 1
+	// Ondatra doesn't seem to support hosts, so must do raw kubectl
+	ip_line, _, err := exec_wrapper("", "kubectl -n wtf exec -it egress -- ip addr | grep 192", Shell)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	egress_ip := netip.MustParsePrefix(strings.Split(strings.TrimSpace(ip_line), " ")[1]).Addr().String()
+	for _, dut := range ondatra.DUTs(t) {
+		full_shell_ping_cmd := fmt.Sprintf(shell_ping_cmd, network_instance, egress_ip, ping_count, sourceAddr(t, dut, egress_ip))
+		// ping stderr will complain about tty and whatnot
+		stdout, _, err := exec_wrapper(dut.Name(), full_shell_ping_cmd, RouterShell)
+		ping_success := strings.Contains(stdout, fmt.Sprintf("%v received", ping_count))
+		if !ping_success {
+			t.Fatalf("Ping received < sent: %v from %v\n\nStdout: %v\nErr: %v\n", egress_ip, dut.Name(), stdout, err)
+		}
+	}
+}
+
+// Create loop, curl gateway (from beginning of path with loop), undo loop, curl again
+// Trace the first request afterwards, accounting for both the looped and normal routing tables (simulating a transient loop)
+func TestLoop(t *testing.T) {
+	// 1. Get the loop details (routers involved) from the configs
+	// If multiple looped paths just use the first for now
+	loop_create_files, err := filepath.Glob("out/" + loop_create_filename[0:strings.Index(loop_create_filename, "%")] + "*")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var looped_router int
 	var src_router int
-	if _, err := fmt.Sscanf(loop_undo_files[0], loop_undo_filename, &looped_router, &src_router); err != nil {
-		t.Fatalf("Loop undo file named wrong?\n")
+	if _, err := fmt.Sscanf(loop_create_files[0], "out/"+loop_create_filename, &looped_router, &src_router); err != nil {
+		t.Fatalf("Loop create file named wrong?\n")
 	}
 	looped_dut := topoNameToDUT(t, fmt.Sprintf("%v%v", dut_name_prefix, looped_router))
 	src_dut := topoNameToDUT(t, fmt.Sprintf("%v%v", dut_name_prefix, src_router))
-	b, err := os.ReadFile(loop_undo_files[0])
+
+	// 2. Create loop, curl should fail
+	loop_create_cmd := fmt.Sprintf("kne topology push %v %v %v", "out/"+topo_filename, looped_dut.Name(), loop_create_files[0])
+	_, _, err = exec_wrapper(looped_dut.Name(), loop_create_cmd, Shell)
 	if err != nil {
 		t.Fatal(err)
 	}
-	re := regexp.MustCompile(template_ip[0:len(template_ip)-1] + ".*/32")
-	dest_prefix := string(re.Find(b))
-	dest_ip := dest_prefix[0 : len(dest_prefix)-len("/32")]
-
-	ping_count := 1
-	/* Ondatra's raw gNOI ping doesn't work bc it doesn't allow setting network instance,
-	 * and router CLI doesn't allow ping in non-interactive mode */
-	full_shell_ping_cmd := fmt.Sprintf(shell_ping_cmd, network_instance, dest_ip, ping_count,
-		sourceForPing(t, src_dut, dest_ip))
-	// ping stderr will complain about tty and whatnot
-	stdout, _, _ := exec_wrapper(src_dut.Name(), full_shell_ping_cmd, RouterShell)
-	ping_success := strings.Contains(stdout, fmt.Sprintf("%v received", ping_count))
-	if ping_success {
-		t.Fatalf("Expected loop ping %v to fail\n", full_shell_ping_cmd)
+	loop_request_id := fmt.Sprintf("test-request-%v-loop", src_dut.Name())
+	stdout, _, _ := curlIstioGateway(t, loop_request_id, src_dut)
+	curl_success := strings.Contains(stdout, "<html>")
+	if curl_success {
+		t.Fatalf("Expected loop curl to fail\n")
 	}
-	tracePing(t, src_dut, dest_ip)
 
-	loop_undo_cmd := fmt.Sprintf("kne topology push %v %v %v", topo_filename, looped_dut.Name(), loop_undo_files[0])
+	// Get path before changing routing tables back (in lieu of watching routing tables)
+	paths := [][]OnPathRouter{getPath(t, src_dut, gateway_ip), {}} // will fill in second path after fixing loop
+
+	// 3. Undo loop, curl should succeed
+	loop_undo_files, err := filepath.Glob("out/" + loop_undo_filename[0:strings.Index(loop_undo_filename, "%")] + "*")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	loop_undo_cmd := fmt.Sprintf("kne topology push %v %v %v", "out/"+topo_filename, looped_dut.Name(), loop_undo_files[0])
 	_, _, err = exec_wrapper(looped_dut.Name(), loop_undo_cmd, Shell)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	stdout, _, _ = exec_wrapper(src_dut.Name(), full_shell_ping_cmd, RouterShell)
-	ping_success = strings.Contains(stdout, fmt.Sprintf("%v received", ping_count))
-	if !ping_success {
-		t.Fatalf("Expected fixed loop ping %v to succeed\n", full_shell_ping_cmd)
+	request_id := fmt.Sprintf("test-request-%v-loop-undone", src_dut.Name())
+	stdout, _, _ = curlIstioGateway(t, request_id, src_dut)
+	curl_success = strings.Contains(stdout, "<html>")
+	if !curl_success {
+		t.Fatalf("Expected undone loop curl to succeed\n")
 	}
-	tracePing(t, src_dut, dest_ip)
 
-	// Once loop is undone, all paths should work
+	// 4. Trace looped request
+	paths[1] = getPath(t, src_dut, gateway_ip)
+	traceRequest(t, src_dut, loop_request_id, paths)
 }
 
-// For each dut with a (bidirectional) static route, ping the dest of that static route
-func TestPingAllStaticRoutes(t *testing.T) {
-	ping_count := 1
+func curlIstioGateway(t *testing.T, request_id string, dut *ondatra.DUTDevice) (string, string, error) {
+	src_addr := sourceAddr(t, dut, gateway_ip)
+	// Note src addr needed even if directly attached to host
+	full_curl_cmd := fmt.Sprintf(curl_cmd, network_instance, src_addr, gateway_url, request_id)
+	return exec_wrapper(dut.Name(), full_curl_cmd, RouterShell)
+}
+
+// For each dut, fetch the productpage a bunch of times.
+// Trace requests that failed (presumably due to a problem in the microservice part,
+// since by this point the network faults have been fixed)
+func TestCurlIstioGateway(t *testing.T) {
+	var failed_requests []struct {
+		string
+		*ondatra.DUTDevice
+	}
 	for _, dut := range ondatra.DUTs(t) {
-		/* Find out which dest this dut has a static route to
-		 * (different duts may route to different ifaces of same dest) */
-		route_entries := LookupAllVals(t, dut, gnmi.OC().NetworkInstance(network_instance).Afts().Ipv4EntryAny().State())
-		for _, entry := range route_entries {
-			if entry.OriginProtocol == oc.PolicyTypes_INSTALL_PROTOCOL_TYPE_STATIC {
-				dest_ip := netip.MustParsePrefix(*entry.Prefix).Addr().String()
-				src_ip := sourceForPing(t, dut, dest_ip)
-				if len(src_ip) == 0 {
-					// This is expected if there is no static route from dest => src
-					fmt.Printf("No source addr for %v to ping %v\n", dut.Name(), dest_ip)
-					continue
-				}
-				full_shell_ping_cmd := fmt.Sprintf(shell_ping_cmd, network_instance, dest_ip, ping_count, src_ip)
-				stdout, _, err := exec_wrapper(dut.Name(), full_shell_ping_cmd, RouterShell)
-				ping_success := strings.Contains(stdout, fmt.Sprintf("%v received", ping_count))
-				if !ping_success {
-					t.Fatalf("Ping received < sent: %v from %v\n\nStdout: %v\nErr: %v\n", dest_ip, dut.Name(), stdout, err)
-				}
+		for i := 0; i < 3; i++ {
+			request_id := fmt.Sprintf("test-request-%v-%v", dut.Name(), i)
+			stdout, stderr, err := curlIstioGateway(t, request_id, dut)
+			curl_success := strings.Contains(stdout, "<html>") && !strings.Contains(stdout, "details are currently unavailable")
+			if !curl_success {
+				t.Logf("Curl Istio gateway from %v failed\n\nStdout: %v\nStderr: %v\nErr: %v\n", dut.Name(), stdout[:20], stderr, err)
+				failed_requests = append(failed_requests, struct {
+					string
+					*ondatra.DUTDevice
+				}{request_id, dut})
 			}
 		}
+	}
+
+	// Trace if failed (ideally on a path not involving the previous loop, to show impact of scoping)
+	for _, request := range failed_requests {
+		paths := [][]OnPathRouter{getPath(t, request.DUTDevice, gateway_ip)}
+		traceRequest(t, request.DUTDevice, request.string, paths)
 	}
 }
 
 // Get all ifaces with nonzero TTL expire counts
 // Also output non-bad routers, for completeness
-func TestGetAllBits(t *testing.T) {
+func getAllBits(t *testing.T) []Router {
 	all_routers := []Router{}
 	// Nokia doesn't support /acl OpenConfig it seems
 	get_ttl_counts_cmd := fmt.Sprintf("info from state acl ipv4-filter %v", ttl_acl)
@@ -301,7 +324,7 @@ func TestGetAllBits(t *testing.T) {
 		}
 		all_routers = append(all_routers, router)
 	}
-	global_output.AllRouters = all_routers
+	return all_routers
 }
 
 // debug
@@ -353,12 +376,8 @@ func neighIPToIface(t *testing.T, dut *ondatra.DUTDevice, target_neigh_ip string
 	return Iface{}
 }
 
-// EASYTODO better logging statements
-func nexthop_dut(t *testing.T, dut *ondatra.DUTDevice, curhop *OnPathRouter, dest_ip string,
-	iface_ips map[string]struct {
-		string
-		*ondatra.DUTDevice
-	}) (*ondatra.DUTDevice, OnPathRouter) {
+// If static route: other endpoint. If direct route: this node
+func route_node(t *testing.T, dut *ondatra.DUTDevice, dest_ip string) *oc.NetworkInstance_Afts_NextHop {
 	nexthop_route := lpm(t, dut, dest_ip)
 	nexthop_group_id := *nexthop_route.NextHopGroup
 	nexthops := LookupAllVals(t, dut,
@@ -372,37 +391,74 @@ func nexthop_dut(t *testing.T, dut *ondatra.DUTDevice, curhop *OnPathRouter, des
 	if !has_val {
 		t.Fatalf("Next hop %v has no val\n", nexthop_idx)
 	}
-	nexthop_ip := nexthop.IpAddress // If static route: IP of other endpoint. If direct route: outgoing IP
-	if nexthop_ip == nil {
+	return nexthop
+}
+
+// EASYTODO better logging statements
+func nexthop_dut(t *testing.T, dut *ondatra.DUTDevice, curhop *OnPathRouter, dest_ip string,
+	iface_ips map[string]struct {
+		string
+		*ondatra.DUTDevice
+	}) (*ondatra.DUTDevice, OnPathRouter) {
+
+	found_route_node := route_node(t, dut, dest_ip)
+	if found_route_node.IpAddress == nil {
+		// No next hop
 		neigh_ip := curhop.PrevHopLink.OutIface.IP
 		curhop.InIface = neighIPToIface(t, dut, neigh_ip)
 		return nil, OnPathRouter{}
 	}
-	nexthop_info := iface_ips[*nexthop_ip]
-	if nexthop_info.DUTDevice.Name() != dut.Name() {
-		// Static route
-		nexthop_router := OnPathRouter{Name: nexthop_info.DUTDevice.Name(), PrevHopLink: curhop,
-			InIface: Iface{Name: nexthop_info.string, IP: *nexthop_ip}}
 
-		curhop.OutIface = neighIPToIface(t, dut, *nexthop_ip)
-		return nexthop_info.DUTDevice, nexthop_router
+	nexthop_info, ok := iface_ips[*found_route_node.IpAddress]
+	if !ok {
+		// No dut found with this IP
+		// Expected if IP is one of egress's =>
+		// If route to egress is direct (normal case): get out iface IP from route to egress
+		// Else (presumably a loop): resolve it
+		found_route_node = route_node(t, dut, *found_route_node.IpAddress)
+		nexthop_info = iface_ips[*found_route_node.IpAddress]
 	}
 
-	// Direct route
-	if nexthop.GetInterfaceRef() == nil {
+	if nexthop_info.DUTDevice != nil && nexthop_info.DUTDevice.Name() != dut.Name() {
+		return nexthop_static(t, dut, curhop, found_route_node, nexthop_info)
+	}
+
+	return nexthop_direct(t, dut, curhop, found_route_node)
+}
+
+func nexthop_static(t *testing.T, dut *ondatra.DUTDevice, curhop *OnPathRouter,
+	found_route_node *oc.NetworkInstance_Afts_NextHop, nexthop_info struct {
+		string
+		*ondatra.DUTDevice
+	}) (*ondatra.DUTDevice, OnPathRouter) {
+	nexthop_router := OnPathRouter{Name: nexthop_info.DUTDevice.Name(), PrevHopLink: curhop,
+		InIface: Iface{Name: nexthop_info.string, IP: *found_route_node.IpAddress}}
+
+	curhop.OutIface = neighIPToIface(t, dut, *found_route_node.IpAddress)
+	return nexthop_info.DUTDevice, nexthop_router
+}
+
+func nexthop_direct(t *testing.T, dut *ondatra.DUTDevice, curhop *OnPathRouter,
+	found_route_node *oc.NetworkInstance_Afts_NextHop) (*ondatra.DUTDevice, OnPathRouter) {
+	if found_route_node.GetInterfaceRef() == nil {
 		t.Fatalf("next hop iface nil")
 	}
 	// local name/IP of outgoing iface
-	iface_name := *nexthop.InterfaceRef.Interface
-	iface_ip := *nexthop.IpAddress
-	subiface := *nexthop.InterfaceRef.Subinterface
+	iface_name := *found_route_node.InterfaceRef.Interface
+	iface_ip := *found_route_node.IpAddress
+	subiface := *found_route_node.InterfaceRef.Subinterface
+	curhop.OutIface = Iface{Name: fmt.Sprintf("%v.%v", iface_name, subiface), IP: iface_ip}
 
 	iface_info, has_val := gnmi.Lookup(t, dut, gnmi.OC().Lldp().Interface(iface_name).State()).Val()
 	if !has_val {
 		t.Fatalf("No iface info")
 	}
-	if len(iface_info.Neighbor) != 1 {
+	if len(iface_info.Neighbor) > 1 {
 		t.Fatalf("Interface %v has %v neighbor DUTs; expected exactly one\n", iface_name, len(iface_info.Neighbor))
+	}
+	if len(iface_info.Neighbor) == 0 {
+		// Iface to egress is expected to have none
+		return nil, OnPathRouter{}
 	}
 
 	var iface_neighbor_dut string
@@ -413,14 +469,13 @@ func nexthop_dut(t *testing.T, dut *ondatra.DUTDevice, curhop *OnPathRouter, des
 	nexthop_dut := topoNameToDUT(t, iface_neighbor_dut)
 	nexthop_router := OnPathRouter{Name: iface_neighbor_dut, PrevHopLink: curhop}
 
-	curhop.OutIface = Iface{Name: fmt.Sprintf("%v.%v", iface_name, subiface), IP: iface_ip}
-
 	return nexthop_dut, nexthop_router
 }
 
-// Get routers on path
-func tracePing(t *testing.T, src_dut *ondatra.DUTDevice, dest_ip string) {
-	global_output.TracedIP = dest_ip
+// Get routers on path, using currently active routing tables (so if changing routing tables, call before & after change).
+// In reality, would watch for routing table change instead of tracing twice (https://netdevops.me/2020/arista-eos-gnmi-tutorial/).
+// Note: Does not include host if host is on path
+func getPath(t *testing.T, src_dut *ondatra.DUTDevice, dest_ip string) []OnPathRouter {
 	iface_ips := getAllIfaces(t)
 	dut := src_dut
 	info := OnPathRouter{Name: src_dut.Name()}
@@ -428,7 +483,7 @@ func tracePing(t *testing.T, src_dut *ondatra.DUTDevice, dest_ip string) {
 	path_ids := map[string]bool{src_dut.Name(): true} // to detect loop
 	i := 1
 	for dut != nil {
-		dut, info = nexthop_dut(t, dut, &path[i-1], dest_ip, iface_ips)
+		dut, info = nexthop_dut(t, dut, &path[i-1], gateway_ip, iface_ips)
 		if dut == nil {
 			break
 		}
@@ -442,12 +497,25 @@ func tracePing(t *testing.T, src_dut *ondatra.DUTDevice, dest_ip string) {
 		i++
 	}
 
-	global_output.Paths = append(global_output.Paths, path)
+	return path
+}
+
+// Send a trace request to the gateway, record info
+func traceRequest(t *testing.T, src_dut *ondatra.DUTDevice, request_id string, paths [][]OnPathRouter) {
+	// Send a trace request. This doesn't affect scoping in the network (hence don't care about output),
+	// but it's more realistic to send from the router.
+	curlIstioGateway(t, "WTFTRACE-"+request_id, src_dut)
+	var out RequestOutput
+	out.TracedIP = gateway_ip
+	out.Paths = paths
+	out.RequestID = request_id
+	global_output.Requests = append(global_output.Requests, out)
 }
 
 // Needs to come last
 func TestWriteOutput(t *testing.T) {
-	b, err := json.Marshal(global_output)
+	global_output.AllRouters = getAllBits(t)
+	b, err := json.MarshalIndent(global_output, "", " ")
 	if err != nil {
 		fmt.Printf("Error marshaling output: %v\n", err)
 	}

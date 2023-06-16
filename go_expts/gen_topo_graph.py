@@ -9,7 +9,7 @@ from itertools import combinations, groupby
 import random
 import json
 
-filepath = "go_expts/"
+filepath = "go_expts/out/"
 
 def gnp_random_connected_graph(n, p, seed=None):
   random.seed(seed) # unseeded if seed=None
@@ -42,7 +42,7 @@ def main():
 
   # {src: {dest: [path], ...}, ...}
   # paths = nx.shortest_path(G)
-  # Only do paths to one dest for now
+  # Only do paths to one dest (the one with largest ID) for now
   paths = nx.shortest_path(G, target=args.nodes-1)
   with open(filepath + "topo.json", "w") as f:
     f.write(f"{{\"Graph\": {json.dumps(nx.node_link_data(G))},\n")
