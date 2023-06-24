@@ -18,7 +18,6 @@ import (
 // Should get all these more programmatically (should also not hard-code in template cfgs)
 const network_instance = "DEFAULT"
 const dut_name_prefix = "srl"
-const topo_filename = "wtf_topo.pbtxt"
 const iface_name = "ethernet-1/%v"
 const iface_key = "e1-%v"
 const template_ip = "192.168.0.X"
@@ -27,21 +26,18 @@ const template_iface = "ethernet-1/Y"
 const template_grp = "grp-X"
 const ttl_acl = "wtf_ttl_filter"
 
+var topo_filename = os.Getenv("WTF_TOPOFILE")
+
 // Note this package is expected to be run from kne root
 
-// Input path for template configs
-const Wtfdir = "go_expts"
-
 // Path for generated files, i.e. input path for graph, output path for all generated files except egress (since outside egress build context)
-const Genpath = Wtfdir + "/out/%v"
-const Egressgenpath = Wtfdir + "/egress/out/%v"
+var kne_workdir = os.Getenv("WTF_KNE_WORKDIR")
+var Genpath = kne_workdir + "/out/%v"
+var Egressgenpath = kne_workdir + "/egress/out/%v"
 
 // Filenames indicate routers involved in looped path
 var loop_create_filename = "loop_create_" + dut_name_prefix + "%d" + "_src_" + dut_name_prefix + "%d.cfg"
 var loop_undo_filename = "loop_undo_" + dut_name_prefix + "%d" + "_src_" + dut_name_prefix + "%d.cfg"
-
-// EASYTODO for files shared b/w this and other programs (py, ondatra, .sh):
-// get names from env var/config file/whatever
 
 var topo_services = map[uint32]*topopb.Service{
 	22: {
@@ -94,7 +90,7 @@ func egressIfaceConfig(id int, iface_ips map[int]map[int]Iface) []string {
 
 // Return the interface part of the config
 func ifaceConfig(id int, iface_ips map[int]map[int]Iface) []string {
-	b, err := os.ReadFile(Wtfdir + "/template_ifaces.cfg")
+	b, err := os.ReadFile(kne_workdir + "/template_ifaces.cfg")
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -117,7 +113,7 @@ func ifaceConfig(id int, iface_ips map[int]map[int]Iface) []string {
 // Creates counter incremented per-subiface when sending a TTL expire ICMP msg
 // (E.g. when dropping ping due to loop, if not original sender of ping)
 func aclConfig(id int, iface_ips map[int]map[int]Iface) []string {
-	b, err := os.ReadFile(Wtfdir + "/template_ttl_acls.cfg")
+	b, err := os.ReadFile(kne_workdir + "/template_ttl_acls.cfg")
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -160,7 +156,7 @@ func egressRouteConfig(id int, router_id int, iface_ips map[int]map[int]Iface, d
 // (id and nexthop_id should have a direct link)
 // Note: host bits must be 0 (for Nokia)
 func staticRouteConfig(id int, nexthop_id int, iface_ips map[int]map[int]Iface, dest_prefix string) []string {
-	b, err := os.ReadFile(Wtfdir + "/template_static_routes.cfg")
+	b, err := os.ReadFile(kne_workdir + "/template_static_routes.cfg")
 	if err != nil {
 		log.Fatalln(err)
 	}
@@ -429,7 +425,7 @@ func main() {
 	loop := flag.Bool("loop", false, "Configure a route loop")
 	flag.Parse()
 
-	b, err := os.ReadFile(fmt.Sprintf(Genpath, "topo.json"))
+	b, err := os.ReadFile(fmt.Sprintf(Genpath, os.Getenv("WTF_TOPOGRAPH")))
 	if err != nil {
 		log.Fatalf("Failed to read generated topo graph %v\n", err)
 	}
@@ -480,7 +476,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("Error marshaling testbed: %v\n", err)
 	}
-	if err := os.WriteFile(fmt.Sprintf(Genpath, "wtf_testbed.textproto"), testbed_bytes, 0666); err != nil {
+	if err := os.WriteFile(fmt.Sprintf(Genpath, os.Getenv("WTF_TESTBEDFILE")), testbed_bytes, 0666); err != nil {
 		log.Fatalf("Error writing testbed file: %v\n", err)
 	}
 }

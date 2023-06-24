@@ -10,8 +10,6 @@ import random
 import re
 import json
 
-test_outfile = "test_out.json"
-
 def trace_path(test_out, path, path_no, request):
   G = nx.DiGraph()
   unhealthy_nodes = set()
@@ -76,7 +74,7 @@ def trace_path(test_out, path, path_no, request):
   #plt.show()
 
 
-def print_trace():
+def print_trace(test_outfile):
   with open(test_outfile) as f:
     test_out = json.load(f)
 
@@ -87,9 +85,11 @@ def print_trace():
 
 def main():
   parser = argparse.ArgumentParser()
+  parser.add_argument("-f", "--input-file", type=str, default=None,
+                      help="File with results of previously made requests, to be traced")
   args = parser.parse_args()
 
-  print_trace()
+  print_trace(args.input_file)
 
 if __name__ == "__main__":
   main()

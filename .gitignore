@@ -6,4 +6,6 @@
 /go.work.sum
 **/super-linter.log
 kne_cli/kne_cli
-licenses_do_not_push.key
+wtf/licenses_do_not_push.key
+wtf/out/*
+wtf/egress/out/*
