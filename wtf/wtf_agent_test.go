@@ -27,7 +27,7 @@ const namespace = "wtf"
 const shell_ping_cmd = "ip netns exec srbase-%v ping %v -c%v -I%v"
 const curl_cmd = "ip netns exec srbase-%v curl --interface %v http://%v/productpage -H 'x-request-id: %v'"
 
-var outfile = os.Getenv("WTF_TESTOUTFILE")
+var outfile = "out/" + os.Getenv("WTF_TESTOUTFILE")
 var gateway_url = os.Getenv("GATEWAY_URL")
 var gateway_ip = strings.Split(gateway_url, ":")[0]
 
