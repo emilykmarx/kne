@@ -228,11 +228,6 @@ func writeConfigFiles(paths map[int][]int, topo_nodes []*topopb.Node, iface_ips 
 			if err != nil {
 				log.Fatalln(err)
 			}
-			/*
-				loop_undo_cfg := fmt.Sprintf("set / network-instance %v static-routes route %v admin-state disable",
-					network_instance, default_prefix)
-			*/
-
 		}
 
 		// Some of this cfg will be output multiple times; ok

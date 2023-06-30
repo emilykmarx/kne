@@ -6,9 +6,13 @@ A testbed consisting of an emulated network (KNE) connected to a service mesh (I
 ## Deploy
 ```
 # Note: the scripts below use the parent directory of this repo (i.e. `../..`) as a working directory.
-# See comments at top of each script for dependencies.
+# Tested with Ubuntu 20
+
+./deps.sh
+newgrp docker
 
 ./setup.sh
+source ~/.bashrc
 
 # Place the license file for SR Linux 23.3.1 in current directory.
 LICENSE=<license filename> ./deploy_cluster.sh
@@ -47,7 +51,7 @@ Type 1 requests can have any `x-request-id` that does not start with `WTFTRACE-`
 Type 2 requests have an `x-request-id` of the form `WTFTRACE-X`, where `X` is any string that does not match a previously used `x-request-id`.
 
 ## Some code details
-This is in a kne fork for convenience, but does not require changes to kne itself (other than upgrading ondatra to fix a problem with large networks, but that may be fixed in a newer version of kne -- should check).
+This is in a kne fork for convenience, but does not require changes to kne itself.
 
 It does require changes to istio's `proxy` repo and to Envoy (there is a script in the `proxy` repo to pull those changes into a Docker image which this repo's deploy script assumes is already built). Due to these changes the extension is built into Envoy rather than loaded as a WASM module.
 

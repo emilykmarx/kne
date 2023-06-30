@@ -1,22 +1,14 @@
 #!/bin/bash
 
 # One-time stuff that needs to happen before deploying
-# Dependencies: KNE's dependencies (see ../docs/setup.md), but not KNE itself
-# Tested with Ubuntu 20
 # Note this makes some sysctl changes
 
 set -e
 
 pushd ../..
 
-# Get repos, install KNE
+# Get repos
 git clone https://github.com/emilykmarx/proxy.git
-git clone https://github.com/openconfig/ondatra.git
-pushd kne
-go mod tidy
-make install
-kne help
-popd
 
 # Get Istio proxy and SR Linux images
 docker pull ghcr.io/nokia/srlinux:23.3.1
@@ -30,8 +22,8 @@ docker tag emarx1/wtf-project-istio:proxyv2_9d02d7b2 hub/proxyv2:tag
 ISTIO_VERSION=1.15.0
 curl -L https://istio.io/downloadIstio | ISTIO_VERSION=$ISTIO_VERSION TARGET_ARCH=x86_64 sh -
 cd istio-$ISTIO_VERSION
+export PATH=$PWD/bin:$PATH
 echo "PATH=$PWD/bin:$PATH" >> ~/.bashrc
-source ~/.bashrc
 
 # For large deployments, to prevent "too many open files" when starting proxy container
 sudo bash -c 'echo "fs.inotify.max_user_watches=1048576" >> /etc/sysctl.conf'
