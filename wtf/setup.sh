@@ -25,9 +25,14 @@ cd istio-$ISTIO_VERSION
 export PATH=$PWD/bin:$PATH
 echo "PATH=$PWD/bin:$PATH" >> ~/.bashrc
 
-# For large deployments, to prevent "too many open files" when starting proxy container
+# For large deployments
+# Prevent "too many open files" when starting proxy container
 sudo bash -c 'echo "fs.inotify.max_user_watches=1048576" >> /etc/sysctl.conf'
 sudo bash -c 'echo "fs.inotify.max_user_instances=1024" >> /etc/sysctl.conf'
 sudo sysctl -p /etc/sysctl.conf
+# Prevent routers crashing due to arp cache overflow
+sudo sysctl -w net.ipv4.neigh.default.gc_thresh1=12800
+sudo sysctl -w net.ipv4.neigh.default.gc_thresh2=51200
+sudo sysctl -w net.ipv4.neigh.default.gc_thresh3=102400
 
 popd
