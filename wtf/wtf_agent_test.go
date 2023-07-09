@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"log"
+	"net"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -27,12 +29,32 @@ const namespace = "wtf"
 const shell_ping_cmd = "ip netns exec srbase-%v ping %v -c%v -I%v"
 const curl_cmd = "ip netns exec srbase-%v curl --interface %v http://%v/productpage -H 'x-request-id: %v'"
 
-var outfile = "out/" + os.Getenv("WTF_TESTOUTFILE")
-var gateway_url = os.Getenv("GATEWAY_URL")
-var gateway_ip = strings.Split(gateway_url, ":")[0]
+var outfile string
+var gateway_url string
+var gateway_ip string
+var topo_filename string
 
 func TestMain(m *testing.M) {
+	var ok bool // avoid re-declaring global
+	topo_filename, ok = os.LookupEnv("WTF_TOPOFILE")
+	if !ok {
+		log.Fatalln("WTF_TOPOFILE not set")
+	}
+	outfilename, ok := os.LookupEnv("WTF_TESTOUTFILE")
+	if !ok {
+		log.Fatalln("WTF_TESTOUTFILE not set")
+	}
+
+	outfile = "out/" + outfilename
 	os.Remove(outfile)
+
+	host, port, err := net.SplitHostPort(os.Getenv("GATEWAY_URL"))
+	if err != nil || host == "" || port == "" {
+		log.Fatalln("GATEWAY_URL not set")
+	}
+	gateway_url = net.JoinHostPort(host, port)
+	gateway_ip = strings.Split(gateway_url, ":")[0]
+
 	ondatra.RunTests(m, kinit.Init)
 }
 

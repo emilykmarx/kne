@@ -26,14 +26,11 @@ const template_iface = "ethernet-1/Y"
 const template_grp = "grp-X"
 const ttl_acl = "wtf_ttl_filter"
 
-var topo_filename = os.Getenv("WTF_TOPOFILE")
-
 // Note this package is expected to be run from kne root
 
 // Path for generated files, i.e. input path for graph, output path for all generated files except egress (since outside egress build context)
-var kne_workdir = os.Getenv("WTF_KNE_WORKDIR")
-var Genpath = kne_workdir + "/out/%v"
-var Egressgenpath = kne_workdir + "/egress/out/%v"
+var kne_workdir string
+var genpath string
 
 // Filenames indicate routers involved in looped path
 var loop_create_filename = "loop_create_" + dut_name_prefix + "%d" + "_src_" + dut_name_prefix + "%d.cfg"
@@ -223,7 +220,7 @@ func writeConfigFiles(paths map[int][]int, topo_nodes []*topopb.Node, iface_ips 
 			loop_src_router := path[0]
 			loop_create_cfg := staticRouteConfig(*p_looped_router, path[len(path)-3], iface_ips, default_prefix)
 			full_loop_create_filename := fmt.Sprintf(loop_create_filename, *p_looped_router, loop_src_router)
-			err := os.WriteFile(fmt.Sprintf(Genpath, full_loop_create_filename),
+			err := os.WriteFile(fmt.Sprintf(genpath, full_loop_create_filename),
 				[]byte(strings.Join(loop_create_cfg, "\n")), 0644)
 			if err != nil {
 				log.Fatalln(err)
@@ -240,7 +237,7 @@ func writeConfigFiles(paths map[int][]int, topo_nodes []*topopb.Node, iface_ips 
 				default_cfg := staticRouteConfig(id, next_id, iface_ips, default_prefix)
 				if p_looped_router != nil && id == *p_looped_router {
 					full_loop_undo_filename := fmt.Sprintf(loop_undo_filename, *p_looped_router, loop_src_router)
-					err := os.WriteFile(fmt.Sprintf(Genpath, full_loop_undo_filename), []byte(strings.Join(default_cfg, "\n")), 0644)
+					err := os.WriteFile(fmt.Sprintf(genpath, full_loop_undo_filename), []byte(strings.Join(default_cfg, "\n")), 0644)
 					if err != nil {
 						log.Fatalln(err)
 					}
@@ -271,7 +268,7 @@ func writeConfigFiles(paths map[int][]int, topo_nodes []*topopb.Node, iface_ips 
 			output := strings.Join(config_lines, "\n")
 
 			// Relative to go root
-			err := os.WriteFile(fmt.Sprintf(Egressgenpath, "egress_setup_ifaces.sh"), []byte(output), 0644)
+			err := os.WriteFile(kne_workdir+"/egress/out/"+"egress_setup_ifaces.sh", []byte(output), 0644)
 			if err != nil {
 				log.Fatalln(err)
 			}
@@ -291,7 +288,7 @@ func writeConfigFiles(paths map[int][]int, topo_nodes []*topopb.Node, iface_ips 
 		// Relative to this directory
 		config_file := fmt.Sprintf("%v.cfg", topo_nodes[id].Name)
 		// Relative to go root
-		err = os.WriteFile(fmt.Sprintf(Genpath, config_file), []byte(output), 0644)
+		err = os.WriteFile(fmt.Sprintf(genpath, config_file), []byte(output), 0644)
 		if err != nil {
 			log.Fatalln(err)
 		}
@@ -417,10 +414,30 @@ func gen_links(topo_graph TopoGraph, iface_ips map[int]map[int]Iface, topo_nodes
  * shouldn't assume that e.g. "srl0" in testbed is "srl0" here
  * (i.e. don't output info here indexed by srl ID) */
 func main() {
+	// Check for env var
+	var ok bool // avoid re-declaring global
+	kne_workdir, ok = os.LookupEnv("WTF_KNE_WORKDIR")
+	if !ok {
+		log.Fatalln("WTF_KNE_WORKDIR not set")
+	}
+	genpath = kne_workdir + "/out/%v"
+	topo_filename, ok := os.LookupEnv("WTF_TOPOFILE")
+	if !ok {
+		log.Fatalln("WTF_TOPOFILE not set")
+	}
+	topograph_filename, ok := os.LookupEnv("WTF_TOPOGRAPH")
+	if !ok {
+		log.Fatalln("WTF_TOPOGRAPH not set")
+	}
+	testbed_filename, ok := os.LookupEnv("WTF_TESTBEDFILE")
+	if !ok {
+		log.Fatalln("WTF_TESTBEDFILE not set")
+	}
+
 	loop := flag.Bool("loop", false, "Configure a route loop")
 	flag.Parse()
 
-	b, err := os.ReadFile(fmt.Sprintf(Genpath, os.Getenv("WTF_TOPOGRAPH")))
+	b, err := os.ReadFile(fmt.Sprintf(genpath, topograph_filename))
 	if err != nil {
 		log.Fatalf("Failed to read generated topo graph %v\n", err)
 	}
@@ -464,14 +481,14 @@ func main() {
 		fmt.Printf("Error marshaling topo: %v\n", err)
 	}
 	// needs to be in same dir as config file (I assume)
-	if err := os.WriteFile(fmt.Sprintf(Genpath, topo_filename), topo_bytes, 0666); err != nil {
+	if err := os.WriteFile(fmt.Sprintf(genpath, topo_filename), topo_bytes, 0666); err != nil {
 		log.Fatalf("Error writing topo file: %v\n", err)
 	}
 	testbed_bytes, err := prototext.MarshalOptions{Multiline: true}.Marshal(testbed)
 	if err != nil {
 		log.Fatalf("Error marshaling testbed: %v\n", err)
 	}
-	if err := os.WriteFile(fmt.Sprintf(Genpath, os.Getenv("WTF_TESTBEDFILE")), testbed_bytes, 0666); err != nil {
+	if err := os.WriteFile(fmt.Sprintf(genpath, testbed_filename), testbed_bytes, 0666); err != nil {
 		log.Fatalf("Error writing testbed file: %v\n", err)
 	}
 }
