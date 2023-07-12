@@ -1,0 +1,7 @@
+These are attempts at adding a HOST node behind srl0, with link host .7 <=> srl0 .6
+Host's curl got to egress, but didn't get natted (compare tcpdump at egress of host when curling from host vs curling from srl0)
+Tried removing docker ip routes from host, and conntrack -F
+
+This doesn't include a route from host to egress (out of laziness)
+Also assumes Istio gateway will be 172.18.0.X (see host routes)
+Host setup script is confusingly called egress_...

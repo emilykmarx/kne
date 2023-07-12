@@ -1,0 +1,250 @@
+name:  "wtf"
+nodes:  {
+  name:  "srl0"
+  config:  {
+    image:  "ghcr.io/nokia/srlinux:23.3.1"
+    file:  "srl0.cfg"
+  }
+  services:  {
+    key:  22
+    value:  {
+      name:  "ssh"
+      inside:  22
+    }
+  }
+  services:  {
+    key:  9337
+    value:  {
+      name:  "gnoi"
+      inside:  57400
+    }
+  }
+  services:  {
+    key:  9339
+    value:  {
+      name:  "gnmi"
+      inside:  57400
+    }
+  }
+  services:  {
+    key:  9340
+    value:  {
+      name:  "gribi"
+      inside:  57401
+    }
+  }
+  services:  {
+    key:  9559
+    value:  {
+      name:  "p4rt"
+      inside:  9559
+    }
+  }
+  vendor:  NOKIA
+  model:  "ixr6e"
+  interfaces:  {
+    key:  "e1-1"
+    value:  {
+      name:  "ethernet-1/1"
+    }
+  }
+}
+nodes:  {
+  name:  "srl1"
+  config:  {
+    image:  "ghcr.io/nokia/srlinux:23.3.1"
+    file:  "srl1.cfg"
+  }
+  services:  {
+    key:  22
+    value:  {
+      name:  "ssh"
+      inside:  22
+    }
+  }
+  services:  {
+    key:  9337
+    value:  {
+      name:  "gnoi"
+      inside:  57400
+    }
+  }
+  services:  {
+    key:  9339
+    value:  {
+      name:  "gnmi"
+      inside:  57400
+    }
+  }
+  services:  {
+    key:  9340
+    value:  {
+      name:  "gribi"
+      inside:  57401
+    }
+  }
+  services:  {
+    key:  9559
+    value:  {
+      name:  "p4rt"
+      inside:  9559
+    }
+  }
+  vendor:  NOKIA
+  model:  "ixr6e"
+  interfaces:  {
+    key:  "e1-1"
+    value:  {
+      name:  "ethernet-1/1"
+    }
+  }
+  interfaces:  {
+    key:  "e1-2"
+    value:  {
+      name:  "ethernet-1/2"
+    }
+  }
+}
+nodes:  {
+  name:  "srl2"
+  config:  {
+    image:  "ghcr.io/nokia/srlinux:23.3.1"
+    file:  "srl2.cfg"
+  }
+  services:  {
+    key:  22
+    value:  {
+      name:  "ssh"
+      inside:  22
+    }
+  }
+  services:  {
+    key:  9337
+    value:  {
+      name:  "gnoi"
+      inside:  57400
+    }
+  }
+  services:  {
+    key:  9339
+    value:  {
+      name:  "gnmi"
+      inside:  57400
+    }
+  }
+  services:  {
+    key:  9340
+    value:  {
+      name:  "gribi"
+      inside:  57401
+    }
+  }
+  services:  {
+    key:  9559
+    value:  {
+      name:  "p4rt"
+      inside:  9559
+    }
+  }
+  vendor:  NOKIA
+  model:  "ixr6e"
+  interfaces:  {
+    key:  "e1-1"
+    value:  {
+      name:  "ethernet-1/1"
+    }
+  }
+  interfaces:  {
+    key:  "e1-2"
+    value:  {
+      name:  "ethernet-1/2"
+    }
+  }
+}
+nodes:  {
+  name:  "egress"
+  config:  {
+    command:  "./setup_nat_ifaces.sh"
+    image:  "egress:latest"
+  }
+  services:  {
+    key:  22
+    value:  {
+      name:  "ssh"
+      inside:  22
+    }
+  }
+  vendor:  HOST
+  interfaces:  {
+    key:  "e1-1"
+    value:  {
+      name:  "ethernet-1/1"
+    }
+  }
+}
+nodes:  {
+  name:  "egress"
+  config:  {
+    command:  "./setup_nat_ifaces.sh"
+    image:  "egress:latest"
+  }
+  services:  {
+    key:  22
+    value:  {
+      name:  "ssh"
+      inside:  22
+    }
+  }
+  vendor:  HOST
+  interfaces:  {
+    key:  "e1-1"
+    value:  {
+      name:  "ethernet-1/1"
+    }
+  }
+}
+nodes:  {
+  name:  "host"
+  config:  {
+    command:  "./egress_setup_ifaces_host.sh"
+    image:  "egress:latest"
+  }
+  services:  {
+    key:  22
+    value:  {
+      name:  "ssh"
+      inside:  22
+    }
+  }
+  vendor:  HOST
+  interfaces:  {
+    key:  "e1-1"
+    value:  {
+      name:  "ethernet-1/1"
+    }
+  }
+}
+links:  {
+  a_node:  "srl0"
+  a_int:  "e1-1"
+  z_node:  "srl1"
+  z_int:  "e1-1"
+}
+links:  {
+  a_node:  "srl1"
+  a_int:  "e1-2"
+  z_node:  "srl2"
+  z_int:  "e1-1"
+}
+links:  {
+  a_node:  "srl2"
+  a_int:  "e1-2"
+  z_node:  "egress"
+  z_int:  "e1-1"
+}
+links:  {
+  a_node:  "srl0"
+  a_int:  "e1-2"
+  z_node:  "host"
+  z_int:  "e1-1"
+}
