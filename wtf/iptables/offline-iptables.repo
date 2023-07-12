@@ -1,0 +1,6 @@
+[offline-iptables]
+name=CentOS-$releasever - iptables
+baseurl=file:///var/tmp/iptables/
+enabled=0
+gpgcheck=1
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-centosofficial

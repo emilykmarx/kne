@@ -1,0 +1,6 @@
+[offline-arptables]
+name=CentOS-$releasever - arptables
+baseurl=file:///var/tmp/arptables
+enabled=0
+gpgcheck=1
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-centosofficial
