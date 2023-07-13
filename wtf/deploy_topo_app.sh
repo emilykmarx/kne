@@ -26,7 +26,9 @@ set +e # ok if not exists
 NAMESPACE=default ../../$ISTIODIR/samples/bookinfo/platform/kube/cleanup.sh
 # Clear any existing logs in ingress
 kubectl -n=istio-system delete pod $(kubectl get pods -A --no-headers -o custom-columns=":metadata.name" | grep ingress)
+kubectl config use-context kind-kne
 kne delete out/$WTF_TOPOFILE
+kubectl config use-context minikube
 sleep 5 # wait for topo to be fully deleted before creating new one, and for ingress to be deleted before creating gateway
 set -e
 
@@ -43,18 +45,16 @@ popd
 docker build -t egress ./egress
 kind load docker-image egress:latest --name kne
 
+kubectl config use-context kind-kne # TODO update context names
 kne create out/$WTF_TOPOFILE
+kubectl config use-context minikube
+# TODO Maybe make an istio issue for the last step of multicluster?
 
 # Create microservice app
 kubectl apply -f ../../$ISTIODIR/samples/bookinfo/platform/kube/bookinfo.yaml
-kubectl scale deployment productpage-v1 --replicas=24
-kubectl scale deployment details-v1 --replicas=24
-kubectl scale deployment ratings-v1 --replicas=5
-kubectl scale deployment reviews-v1 --replicas=5
-kubectl scale deployment reviews-v2 --replicas=5
-kubectl scale deployment reviews-v3 --replicas=5
+# XXX scale deployment
 
-sleep 50 # Wait for gateway to come up before getting its IP, and routers to load startup configs before running tests
+sleep 5 # Wait for gateway to come up before getting its IP, and routers to load startup configs before running tests
 
 # TODO change arbitrary sleeps to waiting for the right condition (these are not always long enough)
 echo "If not all pods are running, pause until they are"
