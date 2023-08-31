@@ -11,7 +11,7 @@ pushd ../..
 git clone https://github.com/emilykmarx/proxy.git
 
 # Get Istio proxy and SR Linux images
-docker pull ghcr.io/nokia/srlinux:23.3.1
+docker pull ghcr.io/nokia/srlinux:23.7.1
 docker pull istio/pilot:1.15.0 # didn't modify pilot, but kind expects pilot & proxyv2 to be in same registry
 docker tag istio/pilot:1.15.0 hub/pilot:tag
 

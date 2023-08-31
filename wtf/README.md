@@ -14,7 +14,7 @@ newgrp docker
 ./setup.sh
 source ~/.bashrc
 
-# Place the license file for SR Linux 23.3.1 in current directory.
+# Place the license file for SR Linux 23.7.1 in current directory.
 LICENSE=<license filename> ./deploy_cluster.sh
 
 # Watch output of this script as it runs.

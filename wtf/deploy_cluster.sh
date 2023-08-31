@@ -24,7 +24,7 @@ kubectl create -n srlinux-controller \
     --dry-run=client --save-config -o yaml | \
     kubectl apply -f -
 
-kind load docker-image ghcr.io/nokia/srlinux:23.3.1 --name kne
+kind load docker-image ghcr.io/nokia/srlinux:23.7.1 --name kne
 
 # Istio stuff
 kind load docker-image hub/pilot:tag --name kne

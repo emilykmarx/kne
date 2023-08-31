@@ -324,7 +324,7 @@ func gen_routers(topo_graph TopoGraph, egress_id int) ([]*topopb.Node, []*testbe
 			Vendor: topopb.Vendor_NOKIA,
 			Model:  "ixr6e",
 			Config: &topopb.Config{
-				Image: "ghcr.io/nokia/srlinux:23.3.1",
+				Image: "ghcr.io/nokia/srlinux:23.7.1",
 			},
 			Services:   topo_services,
 			Interfaces: map[string]*topopb.Interface{},
