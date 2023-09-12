@@ -54,7 +54,13 @@ kubectl scale deployment reviews-v1 --replicas=5
 kubectl scale deployment reviews-v2 --replicas=5
 kubectl scale deployment reviews-v3 --replicas=5
 
-sleep 50 # Wait for gateway to come up before getting its IP, and routers to load startup configs before running tests
+
+while [ $(kubectl get pods -A --field-selector=status.phase!=Running | wc -l) -gt 0 ] \
+ || [ $(kubectl get pods -A -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.containerStatuses[*].ready}{"\n"}{end}' | grep false | wc -l) -gt 0 ] \
+ || [ $(kubectl get srlinux -A | grep "loaded" | wc -l) -ne 3 ]; # TODO don't hardcode that we have 3 srl*
+do
+    sleep 1
+done
 
 # TODO change arbitrary sleeps to waiting for the right condition (these are not always long enough)
 echo "If not all pods are running, pause until they are"
